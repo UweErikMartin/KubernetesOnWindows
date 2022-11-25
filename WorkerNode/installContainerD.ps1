@@ -86,25 +86,6 @@ function getInstalledVersion() {
 	Param (
 		[parameter(mandatory=$true)] [string] $command
 	)
-
-	if (Get-Command containerd -ErrorAction SilentlyContinue) {
-		if ((Invoke-Expression -Command "$command --version") -match ".*v(?<VER>\d+.\d+.\d+).*") {
-			return ($Matches.VER)
-		}
-	}
-	return($null)
-}
-
-###############################################################################
-# Helper function:
-# 
-# gets the semantic version of a comand
-###############################################################################
-function getSemanticVersion {
-	[CmdletBinding()]
-	Param (
-		[parameter(mandatory=$true)] [string] $command
-	)
 	
 	$Path = Get-Command $command -ErrorAction SilentlyContinue | Select-Object -ExpandProperty "Path"
 
@@ -125,10 +106,11 @@ function getSemanticVersion {
 function checkAndInstallContainerd {
 	[CmdletBinding()]
 	Param (
+		[parameter(mandatory=$true)] [string] $DownloadLocation,
 		[parameter(mandatory=$true)] [string] $Version
 	)
 
-	$installedVersion = getSemanticVersion "containerd"
+	$installedVersion = getInstalledVersion "containerd"
 	
 	if ($installedVersion -ne $Version) {
 		$ContainerdPath	= -join ($env:ProgramFiles,"\containerd")
@@ -136,10 +118,17 @@ function checkAndInstallContainerd {
 
 		if (-not (Test-Path -Path $ContainerdPath)) {
 			mkdir -Force $ContainerdPath | Out-Null
+		} else {
+			# it can happen that containerd is not in the path and
+			# therefore not found. Check the default location snd stop and 
+			# remove if it is there
+			if ( (Get-Service -Name "containerd" -ErrorAction SilentlyContinue).Status -eq "Running" ) {
+				Stop-Service "containerd"
+			}
+			Invoke-Expression "& '$ContainerdPath/containerd.exe' --unregister-service"
 		}
 		
-		$UserDownloadFolder = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
-		tar -xvf "$UserDownloadFolder\$ContainerdFileName" --strip-components 1 --directory $ContainerdPath
+		tar -xvf $DownloadLocation --strip-components 1 --directory $ContainerdPath
 		addPath $ContainerdPath
 		return "$ContainerdPath\containerd.exe"
 	} else {
@@ -155,10 +144,11 @@ function checkAndInstallContainerd {
 function checkAndInstallCrictl {
 	[CmdletBinding()]
 	Param (
+		[parameter(mandatory=$true)] [string] $Download,
 		[parameter(mandatory=$true)] [string] $Version
 	)
 
-	$installedVersion = getSemanticVersion "crictl"
+	$installedVersion = getInstalledVersion "crictl"
 	
 	if ($installedVersion -ne $Version) {
 		$CrictlPath	= -join ($env:ProgramFiles,"\crictl")
@@ -168,8 +158,7 @@ function checkAndInstallCrictl {
 			mkdir -Force $CrictlPath | Out-Null
 		}
 		
-		$UserDownloadFolder = (New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path
-		tar -xvf "$UserDownloadFolder\$CrictlFileName" --directory $CrictlPath
+		tar -xvf $Download --directory $CrictlPath
 		addPath $CrictlPath
 
 		$ProfilePath = [Environment]::GetFolderPath("UserProfile")
@@ -217,8 +206,13 @@ function addPath() {
 
 ###############################################################################
 # Main script
-# 
+# The script requires elevation
 ###############################################################################
+if (-Not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] 'Administrator')) {
+	Throw "Please run this script with elevated permission (Run As Administrator)"
+	exit
+}
+
 $allInstalled = checkOrInstallWindowsFeatures $requiredWindowsFeatures
 
 if ( ! $allInstalled ) {
@@ -227,8 +221,8 @@ if ( ! $allInstalled ) {
 }
 
 # Download and install containerd
-checkOrDownloadFile $ContainerdFileName $ContainerdDownload
-$Containerd = checkAndInstallContainerd $ContainerdVersion
+$download = checkOrDownloadFile $ContainerdFileName $ContainerdDownload
+$Containerd = checkAndInstallContainerd $download $ContainerdVersion
 if ( $Containerd ) {
 	$containerdPath = Split-Path $Containerd -Parent
 	Write-Host "Containerd Path: $containerdPath"
@@ -244,8 +238,8 @@ $download = checkOrDownloadFile $CniFileName $CniDownload
 Write-Host "Extract cni-plugins into $Env:SystemDrive\opt\cni\bin"
 Expand-Archive -Path $download -DestinationPath "$Env:SystemDrive\opt\cni\bin" -Force
 
-checkOrDownloadFile $CrictlFileName $CrictlDownload
-checkAndInstallCrictl $CrictlVersion
+$download = checkOrDownloadFile $CrictlFileName $CrictlDownload
+checkAndInstallCrictl $download $CrictlVersion
 
 $NatNetwork = Get-HnsNetwork | Where-Object { $_.Name -eq "nat" }
 
